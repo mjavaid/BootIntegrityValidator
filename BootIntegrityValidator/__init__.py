@@ -374,6 +374,7 @@ class BootIntegrityValidator(object):
         self,
         show_platform_integrity_cmd_output: str,
         show_platform_sudi_certificate_cmd_output: Optional[str] = None,
+        ignore_pcr_errors=False
     ) -> int:
         """
         Takes the CLI output from 'show platform integrity' and validates the output against the KGV
@@ -420,6 +421,7 @@ class BootIntegrityValidator(object):
             cmd_output=show_platform_integrity_cmd_output,
             device_cert_object=device_cert_obj,
             session_id=session_id,
+            ignore_pcr_errors=ignore_pcr_errors
         )
         self._logger.info(f"SID:{session_id} - BIV validation complete")
         return session_id
@@ -686,6 +688,7 @@ class BootIntegrityValidator(object):
         cmd_output: str,
         device_cert_object: Optional[OpenSSL.crypto.X509] = None,
         session_id: int = -1,
+        ignore_pcr_errors = False
     ) -> None:
         """
         Takes show platform integrity sign nonce xxx output and validates the following hashes against the values in the
@@ -835,7 +838,9 @@ class BootIntegrityValidator(object):
                     self._validate_show_platform_integrity_cmd_output_signature(
                         cmd_output=cmd_output,
                         device_cert_object=device_cert_object,
-                        session_id=session_id
+                        session_id=session_id,
+                        ignore_pcr_errors=ignore_pcr_errors,
+                        logger=self._logger
                     )
                 except BootIntegrityValidator.ValidationException as e:
                     self._logger.error(
@@ -1059,7 +1064,11 @@ class BootIntegrityValidator(object):
 
     @staticmethod
     def _validate_show_platform_integrity_cmd_output_signature(
-        cmd_output: str, device_cert_object: OpenSSL.crypto.X509, session_id: int = -1
+        cmd_output: str,
+        device_cert_object: OpenSSL.crypto.X509,
+        session_id: int = -1,
+        ignore_pcr_errors = False,
+        logger = None
     ) -> None:
         """
 
@@ -1177,10 +1186,15 @@ class BootIntegrityValidator(object):
         pcr0_computed_text = base64.b16encode(pcr0_computed).decode()
 
         if pcr0_computed_text != pcr0_received_text:
-            raise BootIntegrityValidator.ValidationException(
-                "The received PCR0 was signed correctly but doesn't match the computed PRC0 using the given measurements.",
-                session_id=session_id
-            )
+            logline = "The received PCR0 was signed correctly but doesn't match the computed PRC0 using the given measurements."
+            if ignore_pcr_errors:
+                if logger != None:
+                    logger.info(f"SID:{session_id} - {logline}")
+            else:
+                raise BootIntegrityValidator.ValidationException(
+                    logline,
+                    session_id=session_id
+                )
 
         # PCR8 Calculation
         os_hashes = BootIntegrityValidator._extract_os_hashes(cmd_output=cmd_output)
@@ -1191,10 +1205,15 @@ class BootIntegrityValidator(object):
 
         pcr8_computed_text = base64.b16encode(pcr8_computed).decode()
         if pcr8_computed_text != pcr8_received_text:
-            raise BootIntegrityValidator.ValidationException(
-                "The received PCR8 was signed correctly but doesn't match the computed PRC8 using the given measurements.",
-                session_id=session_id
-            )
+            logline = "The received PCR8 was signed correctly but doesn't match the computed PRC8 using the given measurements."
+            if ignore_pcr_errors:
+                if logger != None:
+                    logger.info(f"SID:{session_id} - {logline}")
+            else:
+                raise BootIntegrityValidator.ValidationException(
+                    logline,
+                    session_id=session_id
+                )
 
     def validate_v2_cli(
         self,
