@@ -239,6 +239,11 @@ class BootIntegrityValidator(object):
                     package_name, package_cert_path + "/crcam2.pem"
                 )
             )
+            cmca2_obj = self._load_cert_from_stream(
+                pkg_resources.resource_stream(
+                    package_name, package_cert_path + "/cmca2.pem"
+                )
+            )
             innerspace_obj = self._load_cert_from_stream(
                 pkg_resources.resource_stream(
                     package_name, package_cert_path + "/innerspace.cer"
@@ -252,6 +257,7 @@ class BootIntegrityValidator(object):
             self._trusted_store.add_cert(cert=crcam2_obj)
             self._logger.debug("Loaded the Cisco Root CA M2 tree")
             self._cert_obj["crcam2"] = crcam2_obj
+
             store_ctx = OpenSSL.crypto.X509StoreContext(
                 store=self._trusted_store, certificate=innerspace_obj
             )
@@ -261,6 +267,17 @@ class BootIntegrityValidator(object):
             )
             self._trusted_store.add_cert(cert=innerspace_obj)
             self._cert_obj["innerspace"] = innerspace_obj
+
+            store_ctx = OpenSSL.crypto.X509StoreContext(
+                store=self._trusted_store, certificate=cmca2_obj
+            )
+            store_ctx.verify_certificate()
+            self._logger.debug(
+                "Validated the Cisco Manufacturing CA SHA2 cert against the Cisco Root CA M2 tree"
+            )
+            self._trusted_store.add_cert(cert=cmca2_obj)
+            self._cert_obj["cmca2"] = cmca2_obj
+
             store_ctx = OpenSSL.crypto.X509StoreContext(
                 store=self._trusted_store, certificate=kgv_obj
             )
@@ -470,6 +487,8 @@ class BootIntegrityValidator(object):
         act2sudica = self._cert_obj["ACT2SUDICA"]
         crca2099 = self._cert_obj["crca2099"]
         hasudi = self._cert_obj["hasudi"]
+        crcam2 = self._cert_obj["crcam2"]
+        cmca2 = self._cert_obj["cmca2"]
 
         # Extract certs from output
         certs = re.findall(
@@ -500,7 +519,7 @@ class BootIntegrityValidator(object):
             )
             return a_bytes == b_bytes
 
-        if not any([same_cert(x, ca_cert_obj) for x in [crca2048, crca2099]]):
+        if not any([same_cert(x, ca_cert_obj) for x in [crca2048, crca2099, crcam2]]):
             self._logger.error(
                 f"SID:{session_id} - Cisco Root CA in cmd_output doesn't match a known good Cisco Root CA"
             )
@@ -514,7 +533,7 @@ class BootIntegrityValidator(object):
         cisco_sudi_ca_obj = OpenSSL.crypto.load_certificate(
             type=OpenSSL.crypto.FILETYPE_PEM, buffer=cisco_sudi_ca_text.encode()
         )
-        if not any([same_cert(x, cisco_sudi_ca_obj) for x in [act2sudica, hasudi]]):
+        if not any([same_cert(x, cisco_sudi_ca_obj) for x in [act2sudica, hasudi, cmca2]]):
             self._logger.error(
                 f"SID:{session_id} - Cisco SUDI Sub-CA in cmd_output doesn't match known good Cisco SUDI CA"
             )
