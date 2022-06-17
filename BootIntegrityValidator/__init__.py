@@ -848,34 +848,33 @@ class BootIntegrityValidator(object):
         # Some of the biv_hashes are truncated
         acceptable_biv_hash_lengths = (64, 128)
 
-        if "Signature" in cmd_output:
-            if device_cert_object:
-                self._logger.info(
-                    f"SID:{session_id} - 'show platform integrity' command has signature.  Attempt to validate"
+        if device_cert_object:
+            self._logger.info(
+                f"SID:{session_id} - 'show platform integrity' command has signature.  Attempt to validate"
+            )
+            try:
+                self._validate_show_platform_integrity_cmd_output_signature(
+                    cmd_output=cmd_output,
+                    device_cert_object=device_cert_object,
+                    session_id=session_id,
+                    ignore_pcr_errors=ignore_pcr_errors,
+                    logger=self._logger
                 )
-                try:
-                    self._validate_show_platform_integrity_cmd_output_signature(
-                        cmd_output=cmd_output,
-                        device_cert_object=device_cert_object,
-                        session_id=session_id,
-                        ignore_pcr_errors=ignore_pcr_errors,
-                        logger=self._logger
-                    )
-                except BootIntegrityValidator.ValidationException as e:
-                    self._logger.error(
-                        f"SID:{session_id} - Validation failed", exc_info=True
-                    )
-                    raise
-
-                self._logger.info(f"SID:{session_id} - Validation succeeded")
-            else:
+            except BootIntegrityValidator.ValidationException as e:
                 self._logger.error(
-                    f"SID:{session_id} - Can't validate the 'show platform integrity' command signature as the 'show platform sudi certificate' command wasn't provided"
+                    f"SID:{session_id} - Validation failed", exc_info=True
                 )
-                raise BootIntegrityValidator.MissingInfo(
-                    "Signature can't be validated because the SUDI certificates haven't been provided",
-                    session_id=session_id
-                )
+                raise
+
+            self._logger.info(f"SID:{session_id} - Validation succeeded")
+        else:
+            self._logger.error(
+                f"SID:{session_id} - Can't validate the 'show platform integrity' command signature as the 'show platform sudi certificate' command wasn't provided"
+            )
+            raise BootIntegrityValidator.MissingInfo(
+                "Signature can't be validated because the SUDI certificates haven't been provided",
+                session_id=session_id
+            )
 
         kgv_mismatches = []
 
@@ -1123,12 +1122,23 @@ class BootIntegrityValidator(object):
             device_cert_object
         )
 
+        nonce_re = re.search(r"nonce\s+(\d+)", cmd_output)
+        nonce = None
+        if nonce_re:
+            nonce = int(nonce_re.group(1))
+
+        pcr0_re = re.search(r"PCR0:\s+?([0-9A-F]+)", cmd_output, flags=re.DOTALL)
+        pcr0_received_text = pcr0_re.group(1)
+        pcr8_re = re.search(r"PCR8:\s+?([0-9A-F]+)", cmd_output, flags=re.DOTALL)
+        pcr8_received_text = pcr8_re.group(1)
+
         sigs = re.search(
             r"Signature\s+version:\s(\d+).+Signature:.+?([0-9A-F]+)",
             cmd_output,
             flags=re.DOTALL,
         )
         if sigs is None:
+
             raise BootIntegrityValidator.MissingInfo(
                 "Signature not present in cmd_output",
                 session_id=session_id
@@ -1136,18 +1146,8 @@ class BootIntegrityValidator(object):
         sig_version = sigs.group(1)
         sig_signature = sigs.group(2)
 
-        nonce_re = re.search(r"nonce\s+(\d+)", cmd_output)
-        nonce = None
-        if nonce_re:
-            nonce = int(nonce_re.group(1))
-
         # Convert the signature from output in hex to bytes
         sig_signature_bytes = base64.b16decode(s=sig_signature)
-
-        pcr0_re = re.search(r"PCR0:\s+?([0-9A-F]+)", cmd_output, flags=re.DOTALL)
-        pcr0_received_text = pcr0_re.group(1)
-        pcr8_re = re.search(r"PCR8:\s+?([0-9A-F]+)", cmd_output, flags=re.DOTALL)
-        pcr8_received_text = pcr8_re.group(1)
 
         # data to be hashed
         header = (
@@ -1168,10 +1168,13 @@ class BootIntegrityValidator(object):
         device_rsa_key = RSA.importKey(device_pkey_bin)
         verifier = PKCS1_v1_5.new(device_rsa_key)
         if not verifier.verify(calculated_hash, sig_signature_bytes):
-            raise BootIntegrityValidator.ValidationException(
-                "Signature on show platform integrity output failed validation",
-                session_id=session_id
-            )
+            logline = "Signature on show platform integrity output failed validation"
+            if logger != None:
+                logger.info(f"SID:{session_id} - {logline}")
+            else:
+                raise BootIntegrityValidator.ValidationException(
+                    logline, session_id=session_id
+                )
 
         # Signature over the reported PCR0 and PRCR8 passed.  Now they need to be computed and compared against
         # the received values.
