@@ -850,7 +850,7 @@ class BootIntegrityValidator(object):
 
         if device_cert_object:
             self._logger.info(
-                f"SID:{session_id} - 'show platform integrity' command has signature.  Attempt to validate"
+                f"SID:{session_id} - Attempt to validate 'show platform integrity' command measurements."
             )
             try:
                 self._validate_show_platform_integrity_cmd_output_signature(
