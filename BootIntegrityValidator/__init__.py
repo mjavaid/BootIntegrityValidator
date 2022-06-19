@@ -774,7 +774,7 @@ class BootIntegrityValidator(object):
                 if kgv.get("dtype", "") == dtype:
                     yield kgv
 
-        def validate_hash(cli_version, cli_hash, kgvs):
+        def validate_hash(cli_version, cli_hash, kgvs, dtype):
             """
             Looks for the cli_version in the versions and if present then checks the cli_hash against biv_hashes in entries
 
@@ -801,11 +801,13 @@ class BootIntegrityValidator(object):
                     return
 
             raise BootIntegrityValidator.ValidationException(
-                f"version with biv_hash {cli_hash} not found in list of valid hashes",
+                f"dtype:{dtype} - version with biv_hash ({cli_hash}) not found in list of valid hashes",
                 session_id=session_id
             )
 
         def validate_all_os_hashes(os_hashes: Tuple[str, str]):
+            kgv_mismatches = []
+
             kgvs = kgvs_for_dtype(dtype="osimage")
             first_filename, first_hash = os_hashes[0]
             if re.search(r"^.*(?<!mono)-universalk9.*$", first_filename):
@@ -817,9 +819,8 @@ class BootIntegrityValidator(object):
                         break
 
                 if not parent_kgv:
-                    raise BootIntegrityValidator.ValidationException(
-                        f"version with biv_hash {first_hash} not found in list of valid hashes",
-                        session_id=session_id
+                    kgv_mismatches.append(
+                        f"SID:{session_id} - dtype:osimage -  version ({first_filename}) with biv_hash ({first_hash}) not found in list of valid hashes"
                     )
 
                 pkg_kgvs = {
@@ -835,15 +836,14 @@ class BootIntegrityValidator(object):
 
             for given_pkg_filename, given_pkg_hash in os_hashes[1:]:
                 if given_pkg_filename not in pkg_kgvs:
-                    raise BootIntegrityValidator.ValidationException(
-                        f"package {given_pkg_filename} not found in list of valid hashes",
-                        session_id=session_id
-                    )
+                    kgv_mismatches.append(f"SID:{session_id} - dtype:osimage - package ({given_pkg_filename}) not found in list of valid hashes")
+                    
                 if pkg_kgvs[given_pkg_filename] != given_pkg_hash:
-                    raise BootIntegrityValidator.ValidationException(
-                        f"version {given_pkg_filename} with biv_hash {given_pkg_hash} doesn't match Known good value of {pkg_kgvs[given_pkg_filename]}",
-                        session_id=session_id
+                    kgv_mismatches.append(
+                        f"SID:{session_id} - dtype:osimage - version ({given_pkg_filename}) with biv_hash ({given_pkg_hash}) doesn't match Known good value of {pkg_kgvs[given_pkg_filename]}"
                     )
+            
+            return kgv_mismatches
 
         # Some of the biv_hashes are truncated
         acceptable_biv_hash_lengths = (64, 128)
@@ -921,6 +921,7 @@ class BootIntegrityValidator(object):
                 cli_version=boot_0_version_re.group(1),
                 cli_hash=boot_0_hash_re.group(1),
                 kgvs=kgvs_for_dtype(dtype="boot0"),
+                dtype="boot0"
             )
             self._logger.info(f"SID:{session_id} - Boot 0 validation successful")
         except BootIntegrityValidator.ValidationException as e:
@@ -967,6 +968,7 @@ class BootIntegrityValidator(object):
                 cli_version=boot_loader_version_re.group(1),
                 cli_hash=boot_loader_hash_re.group(1),
                 kgvs=kgvs_for_dtype(dtype="blr"),
+                dtype="blr"
             )
             self._logger.info(f"SID:{session_id} - Boot Loader validation successful")
         except BootIntegrityValidator.ValidationException as e:
@@ -998,21 +1000,23 @@ class BootIntegrityValidator(object):
                     session_id=session_id
                 )
 
-        try:
-            if len(os_hashes) == 1:
+        if len(os_hashes) == 1:
+            try:
                 # Single OS hash
                 validate_hash(
                     cli_version=os_version_re.group(1),
                     cli_hash=os_hashes[0][1],
                     kgvs=kgvs_for_dtype(dtype="osimage"),
+                    dtype="osimage"
                 )
-                self._logger.info(f"SID:{session_id} - OS validation successful")
-                # Successfully validated
-            else:
-                # Multi hash to validate
-                validate_all_os_hashes(os_hashes=os_hashes)
-        except BootIntegrityValidator.ValidationException as e:
-            kgv_mismatches.append(e)
+            except BootIntegrityValidator.ValidationException as e:
+                kgv_mismatches.append(e)
+        else:
+            # Multi hash to validate
+            kgv_mismatches = kgv_mismatches + validate_all_os_hashes(os_hashes=os_hashes)
+        
+        self._logger.info(f"SID:{session_id} - OS validation successful")
+        # Successfully validated
 
         if kgv_mismatches:
             raise BootIntegrityValidator.ValidationException(
@@ -1138,43 +1142,46 @@ class BootIntegrityValidator(object):
             flags=re.DOTALL,
         )
         if sigs is None:
-
-            raise BootIntegrityValidator.MissingInfo(
-                "Signature not present in cmd_output",
-                session_id=session_id
-            )
-        sig_version = sigs.group(1)
-        sig_signature = sigs.group(2)
-
-        # Convert the signature from output in hex to bytes
-        sig_signature_bytes = base64.b16decode(s=sig_signature)
-
-        # data to be hashed
-        header = (
-            struct.pack(">QI", int(nonce), int(sig_version))
-            if nonce
-            else struct.pack(">I", int(sig_version))
-        )
-        pcr0_received_bytes = base64.b16decode(pcr0_received_text)
-        pcr8_received_bytes = base64.b16decode(pcr8_received_text)
-        data_to_be_hashed = header + pcr0_received_bytes + pcr8_received_bytes
-        calculated_hash = SHA256.new(data_to_be_hashed)
-
-        # validate calculated hash
-        device_pkey_bin = OpenSSL.crypto.dump_publickey(
-            type=OpenSSL.crypto.FILETYPE_ASN1, pkey=device_cert_object.get_pubkey()
-        )
-
-        device_rsa_key = RSA.importKey(device_pkey_bin)
-        verifier = PKCS1_v1_5.new(device_rsa_key)
-        if not verifier.verify(calculated_hash, sig_signature_bytes):
-            logline = "Signature on show platform integrity output failed validation"
+            logline = "Signature not present in cmd_output"
             if logger != None:
                 logger.info(f"SID:{session_id} - {logline}")
             else:
-                raise BootIntegrityValidator.ValidationException(
+                raise BootIntegrityValidator.MissingInfo(
                     logline, session_id=session_id
                 )
+        else:
+            sig_version = sigs.group(1)
+            sig_signature = sigs.group(2)
+
+            # Convert the signature from output in hex to bytes
+            sig_signature_bytes = base64.b16decode(s=sig_signature)
+
+            # data to be hashed
+            header = (
+                struct.pack(">QI", int(nonce), int(sig_version))
+                if nonce
+                else struct.pack(">I", int(sig_version))
+            )
+            pcr0_received_bytes = base64.b16decode(pcr0_received_text)
+            pcr8_received_bytes = base64.b16decode(pcr8_received_text)
+            data_to_be_hashed = header + pcr0_received_bytes + pcr8_received_bytes
+            calculated_hash = SHA256.new(data_to_be_hashed)
+
+            # validate calculated hash
+            device_pkey_bin = OpenSSL.crypto.dump_publickey(
+                type=OpenSSL.crypto.FILETYPE_ASN1, pkey=device_cert_object.get_pubkey()
+            )
+
+            device_rsa_key = RSA.importKey(device_pkey_bin)
+            verifier = PKCS1_v1_5.new(device_rsa_key)
+            if not verifier.verify(calculated_hash, sig_signature_bytes):
+                logline = "Signature on show platform integrity output failed validation"
+                if logger != None:
+                    logger.info(f"SID:{session_id} - {logline}")
+                else:
+                    raise BootIntegrityValidator.ValidationException(
+                        logline, session_id=session_id
+                    )
 
         # Signature over the reported PCR0 and PRCR8 passed.  Now they need to be computed and compared against
         # the received values.
@@ -1209,6 +1216,7 @@ class BootIntegrityValidator(object):
 
         if pcr0_computed_text != pcr0_received_text:
             logline = "The received PCR0 was signed correctly but doesn't match the computed PRC0 using the given measurements."
+            logline += f" (R: {pcr0_received_text}, E: {pcr0_computed_text})"
             if ignore_pcr_errors:
                 if logger != None:
                     logger.info(f"SID:{session_id} - {logline}")
@@ -1228,6 +1236,7 @@ class BootIntegrityValidator(object):
         pcr8_computed_text = base64.b16encode(pcr8_computed).decode()
         if pcr8_computed_text != pcr8_received_text:
             logline = "The received PCR8 was signed correctly but doesn't match the computed PRC8 using the given measurements."
+            logline += f" (R: {pcr8_received_text}, E: {pcr8_computed_text})"
             if ignore_pcr_errors:
                 if logger != None:
                     logger.info(f"SID:{session_id} - {logline}")
